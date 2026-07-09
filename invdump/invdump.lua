@@ -1,14 +1,13 @@
 addon.name    = 'invdump'
 addon.author  = 'Beciant'
-addon.version = '1.9'
-addon.desc    = 'Dump inventory with augments + wardrobe names (Ashita v4)'
+addon.version = '1.0'
+addon.desc    = 'Dumps inventory with augment descriptions to a text file.(Ashita v4)'
 
 require 'common'
+package.path = package.path .. ';' .. AshitaCore:GetInstallPath() .. '\\addons\\invdump\\assets\\?.lua'
+-- Load the augment table
+local augdata = require('augment_table')
 
--- Force-load augment table using absolute path
-local base = AshitaCore:GetInstallPath()
-local augment_path = string.format('%s\\addons\\invdump\\assets\\augment_table.lua', base)
-local augment_names = assert(loadfile(augment_path))()
 
 -- Container names based on Ashita v4 ordering
 local container_names = {
@@ -33,28 +32,42 @@ local container_names = {
 }
 
 -----------------------------------------------------------------------
--- SAFE AUGMENT DECODER (Ashita v4)
------------------------------------------------------------------------
-local function decode_augments(extra, info)
-    -- Only gear categories can have augments
-    if not info or info.Type < 1 or info.Type > 4 then
-        return nil
+-- UNIVERSAL AUGMENT RESOLVER
+local function resolve_augments(item, info)
+    local name = info and info.Name[1] or nil
+    if not name then return nil end
+
+    -- 1. Magian / Trial / Relic / Homestead
+    local mag = augdata.Magian[item.Id]
+    if mag then
+        return mag
     end
 
+    -- 2. Ambuscade Path
+    local path = augdata.Paths[name]
+    if path then
+        return { "Path " .. path }
+    end
+
+    -- 3. Modern augmented items
+    local modern = augdata.Modern[name]
+    if modern then
+        return modern
+    end
+
+    -- 4. Standard augment block
+    local extra = item.Extra
     if not extra or #extra < 5 then
         return nil
     end
 
     local count = extra:byte(1)
-
-    -- Valid augment count is 1–12
     if count < 1 or count > 12 then
         return nil
     end
 
-    -- Augment block must be exactly 1 + count*4 bytes
     local needed = 1 + (count * 4)
-    if #extra ~= needed then
+    if #extra < needed then
         return nil
     end
 
@@ -67,35 +80,51 @@ local function decode_augments(extra, info)
 
         if val > 32767 then val = val - 65536 end
 
-        table.insert(augments, { id = id, val = val })
+        local aname = augdata.Standard[id] or ("AugID:" .. id)
+        table.insert(augments, string.format("%s %+d", aname, val))
+
         pos = pos + 4
     end
 
-    return (#augments > 0) and augments or nil
+    -- 5. Hide legacy augments
+    local function is_legacy(aug)
+        if not aug or #aug == 0 then
+            return true
+        end
+
+        for _, a in ipairs(aug) do
+            if a:find("AugID:0") or a:find("AugID:67") then
+                return true
+            end
+
+            local val = tonumber(a:match("([%+%-]%d+)"))
+            if val and math.abs(val) > 5000 then
+                return true
+            end
+
+            if a:find("AugID:") then
+                return true
+            end
+        end
+
+        return false
+    end
+
+    if is_legacy(augments) then
+        return nil
+    end
+
+    return augments
 end
 
 
------------------------------------------------------------------------
--- Convert augment list to readable text
------------------------------------------------------------------------
-local function augment_text(augments)
-    if not augments then
-        return ''
-    end
-
-    local parts = {}
-
-    for _, a in ipairs(augments) do
-        local name = augment_names[a.id] or ('AugID:' .. a.id)
-        table.insert(parts, string.format('%s %+d', name, a.val))
-    end
-
-    return table.concat(parts, ', ')
+local function augment_text(aug)
+    if not aug then return '' end
+    return table.concat(aug, ', ')
 end
 
 -----------------------------------------------------------------------
 -- MAIN INVENTORY DUMP
------------------------------------------------------------------------
 local function dump_inventory()
     local mm  = AshitaCore:GetMemoryManager()
     local inv = mm:GetInventory()
@@ -130,7 +159,7 @@ local function dump_inventory()
                 local info = res:GetItemById(item.Id)
                 local name = info and info.Name[1] or 'Unknown'
 
-                local aug = decode_augments(item.Extra, info)
+                local aug = resolve_augments(item, info)
                 local augtxt = augment_text(aug)
 
                 f:write(string.format(
@@ -148,9 +177,6 @@ local function dump_inventory()
     print(string.format('Inventory dumped to %s', path))
 end
 
------------------------------------------------------------------------
--- COMMAND HANDLER
------------------------------------------------------------------------
 ashita.events.register('command', 'command_cb', function(e)
     local args = e.command:args()
     if args[1] == '/invdump' then
